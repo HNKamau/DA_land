@@ -2,24 +2,6 @@
 # used only in model construction
 #
 # ----------------------------------------------------------------------------
-# REVISION NOTE (correlation among inputs) -- addresses reviewer comment that
-# the Monte Carlo assumed independence among maize price, production cost,
-# lease price, inflation, and household income.
-#
-# Note 1 (structural, in THIS file): inflation is treated as a common driver.
-# The nominal monetary series maize_price_kes_kg, compensation_income_pm_acre
-# (lease), hh_income_pa, and off_farm_income_kes_pm now carry the same
-# relative_trend = inflation_rate that was already applied to costs and asset
-# values. Because every iteration draws ONE inflation_rate and applies it to
-# all of them, these series co-move over the 25-year horizon exactly as the
-# reviewer expects, and internal consistency is restored (previously costs
-# were inflated but maize revenue and lease income were not, biasing NPV).
-#
-# Note 2 (cross-sectional, in the .Rmd): residual contemporaneous correlation
-# among the base draws of these variables is induced via a correlation matrix
-# attached to the decisionSupport estimate (copula method, preserves marginals).
-# See the revised simulation chunk provided separately.
-# ----------------------------------------------------------------------------
 
 set.seed(254)
 
@@ -59,7 +41,7 @@ land_consolidation_function <- function(x, varnames)
   crop_benefit <- 
     adjusted_farmer_yield_t_ha * 
     ha_per_hh * 1000 * # conversion to kg/ha
-    vv(maize_price_kes_kg, gen_CV, n_years, relative_trend = inflation_rate) # CHANGED: maize price now shares the inflation trend (see note 1)
+    vv(maize_price_kes_kg, gen_CV, n_years, relative_trend = inflation_rate) 
   
   # natural capital  
   # The community values land security not only as having title deeds but also the ability to invest in perennial plants such as trees. Trees provide numerous benefits including provision of fuel wood, fruits, soil protection, among others. 
@@ -78,7 +60,7 @@ land_consolidation_function <- function(x, varnames)
   # Medical Bills from farm related stresses
   # Farmers are at a high risk of diseases, and stress from higher exposure to farm related accidents, air pollution and pesticides David et al.2021 (https://doi.org/10.3390/su132011384). Conversely, Active lifestyles through working on farm has been associated with a reduction in health costs. For instance, Aoyagi & Shephard 2012 (https://doi.org/10.2165/11590530-000000000-00000) found a 3.7% reduction, and Sato et al. 2020 (https://doi.org/10.1016/j.amepre.2019.12.009) a 0.4% in 2 years and 1% in 3 years. 
   
-  medical_bills <- prop_hhincome_spent_on_hospital/100 * vv(hh_income_pa, gen_CV, n_years, relative_trend = inflation_rate) # CHANGED: household income now shares the inflation trend (see note 1)
+  medical_bills <- prop_hhincome_spent_on_hospital/100 * vv(hh_income_pa, gen_CV, n_years, relative_trend = inflation_rate) 
   
   do_nothing_medical_bills <- medical_bills * (1-pc_healthcosts_reduced_physical_activities/100) # percent saved due to active lifestyle
   
@@ -111,7 +93,7 @@ land_consolidation_function <- function(x, varnames)
   
   # D) Farmer Benefits with land consolidation ####
   # A farmer who leases their land, gets a compensation fee commensurate to their land size. 
-  income_from_land_leasing <- vv(compensation_income_pm_acre, gen_CV, n_years, relative_trend = inflation_rate)* 2 * # CHANGED: lease price now shares the inflation trend (see note 1)
+  income_from_land_leasing <- vv(compensation_income_pm_acre, gen_CV, n_years, relative_trend = inflation_rate)* 2 * 
     ha_per_hh * ha_acre_conversion
   
   
