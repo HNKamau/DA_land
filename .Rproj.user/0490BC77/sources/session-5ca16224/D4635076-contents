@@ -1,0 +1,300 @@
+---
+title: |
+  <center> Sensitivity analysis of a hypothetical land </center>
+  <center> use decision for smallholder farmers </center>
+  <center>  in Kenya </center>
+  <br>
+  <center><i> supplementary material 2 </i></center>
+  <br>
+author: "Hannah Kamau"
+bibliography: 
+- bib/references.bib
+output:
+  html_document:
+    toc: true
+    code_folding: hide
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(decisionSupport)
+library(tidyverse)
+library(scales)
+library(kableExtra)
+library(Matrix)   # only for the nearPD() safeguard when scaling correlations
+library(here)
+set.seed(254)
+
+# ----  formatting purposes ----
+# All monetary outputs are net_benefit_lc_kes (Kenya shillings), shown in MILLION KES.
+M       <- 1e6
+fmt_m   <- function(x) formatC(x / M, format = "f", digits = 2, big.mark = ",")  # million KES, 2 dp
+fmt_pct <- function(x) scales::percent(x, accuracy = 0.1)
+lab_m   <- scales::label_number(scale = 1e-6, accuracy = 0.1)                     # axis labels in million KES
+```
+
+# Objective
+
+Sensitivity analysis on the `land_consolidation.R` model. Three tests are done here 
+
+* the assumption of independence (non-correlation)
+* varying the project horizon (`n_years` = 5, 10, 15, 20, 25) and 
+* varying the discount rate (`discount_rate` = 5, 8, 10, 12, 15).
+
+
+```{r source-function}
+source("land_consolidation_function.R", encoding = "UTF-8")
+```
+
+# Control parameters
+
+```{r controls}
+base_nyears   <- 25
+base_discount <- 10  # base discount rate (%) for one-at-a-time analyses 
+nyear_grid    <- c(5, 10, 15, 20, 25) # sensitivity analysis B
+discount_grid <- c(5, 8, 10, 12, 15) # sensitivity analysis C
+corr_scales   <- c(0, 0.5, 1, 1.5)   # sensitivity analysis A
+# 0 = independent, 0.5 a weaker co-movement, 1 = assumed matrix, and 1.5 a stronger co-movement. (see later in the script)
+n_runs_base <- 1e4
+n_runs_grid <- 1e4 # per cell
+```
+
+# Base estimate and target correlation matrix
+
+Judgment based correlations 
+
+```{r estimate-and-cor}
+base_estimate <- decisionSupport::estimate_read_csv("land_consolidation_input.csv", sep = ";")
+
+base_estimate$correlation_matrix <- NULL   # correlation is induced manually below
+
+cor_vars <- c("maize_price_kes_kg", "production_costs_acre",
+              "compensation_income_pm_acre", "hh_income_pa")
+
+cor_mat <- matrix(c(
+  1.00, 0.55, 0.45, 0.35, # source: judgment
+  0.55, 1.00, 0.30, 0.20,
+  0.45, 0.30, 1.00, 0.30,
+  0.35, 0.20, 0.30, 1.00),
+  nrow = 4, byrow = TRUE, dimnames = list(cor_vars, cor_vars)) 
+
+
+stopifnot(all(eigen(cor_mat, only.values = TRUE)$values > 0))
+```
+
+# Iman–Conover induction + row-wise model application
+In 5 pieces i.e., draw the inputs, correlate them, push the inputs through the `land_consolidation_function`
+(model), and summarise the outputs. I apply Iman-Conover method [@iman1982] which reorders the rows to match a set correlation target. 
+
+```{r iman_conover_induction}
+iman_conover <- function(X, target) {
+  X <- as.matrix(X); n <- nrow(X); k <- ncol(X)
+  a <- qnorm(seq_len(n) / (n + 1))                 # van der Waerden scores
+  R <- sapply(seq_len(k), function(j) sample(a))   # random permutation per column
+  P <- chol(cor(R))                                # cor(R) = t(P) %*% P  (upper)
+  Q <- chol(target)
+  Rstar <- R %*% solve(P) %*% Q                    # cor(Rstar) ~ target
+  Y <- X
+  for (j in seq_len(k)) {                          # reorder X to Rstar's rank pattern
+    Y[, j] <- sort(X[, j])[rank(Rstar[, j], ties.method = "first")]
+  }
+  as.data.frame(Y)
+}
+
+# scale off-diagonals, keep valid & positive-definite
+scale_cor <- function(m, s) {
+  if (s == 0) return(NULL)
+  od <- row(m) != col(m); m[od] <- pmin(pmax(m[od] * s, -0.95), 0.95)
+  if (any(eigen(m, only.values = TRUE)$values <= 0))
+    m <- as.matrix(Matrix::nearPD(m, corr = TRUE)$mat)
+  m
+}
+
+# I prioritise KES scalar outputs of the model. The USD outputs and the
+# vector output Cashflow_decision_do are deliberately excluded. KES is used to
+# maintain the reporting in the manuscript.
+scalar_out <- c("benefit_lc_kes", "benefit_status_quo_kes", "net_benefit_lc_kes")
+
+# apply a `plainNames` model function row-by-row (returns the KES scalar outputs)
+apply_model <- function(x, fn, keep = scalar_out) {
+  do.call(rbind, lapply(seq_len(nrow(x)), function(i) {
+    f <- fn
+    environment(f) <- list2env(as.list(x[i, , drop = FALSE]), parent = globalenv())
+    as.data.frame(f()[keep])
+  }))
+}
+
+# draw independent marginals, induce correlation, run model -> net benefit (KES)
+simulate_nb <- function(n_years_val = base_nyears, discount_val = base_discount,
+                        target_cor = cor_mat, n_runs = n_runs_grid) {
+  est <- base_estimate
+  est$marginal["n_years", "distribution"]       <- "const"
+  est$marginal["discount_rate", "distribution"] <- "const"
+  for (col in intersect(c("lower", "median", "upper"), colnames(est$marginal))) {
+    est$marginal["n_years", col]       <- n_years_val
+    est$marginal["discount_rate", col] <- discount_val
+  }
+  x <- as.data.frame(decisionSupport::random(rho = est, n = n_runs, method = "calculate"))
+  if (!is.null(target_cor)) x[cor_vars] <- iman_conover(x[cor_vars], target_cor)
+  nb_total <- apply_model(x, land_consolidation_function)$net_benefit_lc_kes  # KES (per household)
+  nb_total / x$ha_per_hh   # standardise to per hectare (KES/ha), as in the main analysis
+}
+
+summ <- function(nb, ...) data.frame(...,
+  mean = mean(nb, na.rm = TRUE), median = median(nb, na.rm = TRUE),
+  p5 = as.numeric(quantile(nb, .05, na.rm = TRUE)),
+  p95 = as.numeric(quantile(nb, .95, na.rm = TRUE)),
+  P_positive = mean(nb > 0, na.rm = TRUE), row.names = NULL)
+```
+
+# Base correlated run and verification
+
+Achieved rank correlation should approximate the target; marginals are preserved
+by construction.
+
+```{r base-verify}
+xv <- as.data.frame(decisionSupport::random(rho = base_estimate, n = n_runs_base,
+                                            method = "calculate"))
+xv[cor_vars] <- iman_conover(xv[cor_vars], cor_mat)
+cat("Target rank correlation:\n");   print(round(cor_mat, 2))
+cat("\nAchieved rank correlation:\n"); print(round(cor(xv[cor_vars], method = "spearman"), 2))
+# the achieved Spearman correlations are below target by either -0.01 or -0.02. 
+#  Nevertheless, this supports [@iman1982] as the MC reproduces the targeted rank correlation
+
+nb_base <- simulate_nb(n_runs = n_runs_base)
+summ(nb_base, case = "base (corr on, 25y, 10%)") %>%
+  transmute(Case = case, Mean = fmt_m(mean), Median = fmt_m(median),
+            `5th pct` = fmt_m(p5), `95th pct` = fmt_m(p95),
+            `P(net benefit > 0)` = fmt_pct(P_positive)) %>%
+  kbl(caption = "Base case net benefit (million KES per hectare).", 
+      booktabs = TRUE, align = "lrrrrr") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                latex_options = c("striped", "hold_position"), full_width = FALSE)
+```
+# Sensitivity A — correlation strength
+
+```{r sens-corr}
+sens_corr <- do.call(rbind, lapply(corr_scales, function(s)
+  summ(simulate_nb(target_cor = scale_cor(cor_mat, s)), cor_scale = s)))
+
+corr_labels <- c("0"   = "Independent (0×)",
+                 "0.5" = "Half strength (0.5×)",
+                 "1"   = "Assumed (1×)",
+                 "1.5" = "Stronger (1.5×)")
+
+sens_corr %>%
+  transmute(
+    `Input dependence`    = corr_labels[as.character(cor_scale)],
+    `Mean`                = fmt_m(mean),
+    `Median`              = fmt_m(median),
+    `5th percentile`      = fmt_m(p5),
+    `95th percentile`     = fmt_m(p95),
+    `P(net benefit > 0)`  = fmt_pct(P_positive)
+  ) %>%
+  kbl(caption = "Net benefit of land consolidation (million KES per hectare) 
+  under increasing variable correlation.",
+      booktabs = TRUE, align = "lrrrrr", escape = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                latex_options = c("striped", "hold_position"),
+                full_width = FALSE, position = "center") %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(1, width = "3.2cm") %>%
+  footnote(
+    general = paste0(
+      "Net benefit = NPV(land consolidation) - NPV(maintain farms) = net_benefit_lc_kes, ",
+      "reported in million KES per hectare, over a ", base_nyears, "-year horizon at a ",
+      base_discount, "% discount rate. Correlations among maize price, production cost, ",
+      "lease income and household income are induced with the Iman-Conover method. ",
+      "Input dependence scales the off-diagonal entries of the assumed correlation matrix, ",
+      "i.e. how strongly these four inputs co-move: Independent (0x) sets all pairwise ",
+      "correlations to zero, so each input varies on its own; Half strength (0.5x) halves ",
+      "the assumed correlations (weaker co-movement); Assumed (1x) applies the judgment-",
+      "based target matrix; and Stronger (1.5x) inflates the assumed correlations ",
+      "by 50% (stronger co-movement), bounded so the matrix remains valid and positive-definite. ",
+      "Based on ", format(n_runs_grid, big.mark = ","),
+      " Monte Carlo runs per row."),
+    general_title = "Note. ", threeparttable = TRUE, footnote_as_chunk = TRUE)
+```
+
+# Sensitivity B — project horizon (n_years)
+
+```{r sens-horizon}
+sens_years <- do.call(rbind, lapply(nyear_grid, function(ny)
+  summ(simulate_nb(n_years_val = ny), n_years = ny)))
+
+sens_years %>%
+  transmute(`Project horizon (years)` = n_years, Mean = fmt_m(mean), Median = fmt_m(median),
+            `5th pct` = fmt_m(p5), `95th pct` = fmt_m(p95),
+            `P(net benefit > 0)` = fmt_pct(P_positive)) %>%
+  kbl(caption = "Net benefit (million KES per hectare) vs project horizon.", booktabs = TRUE,
+      align = "rrrrrr") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                latex_options = c("striped", "hold_position"), full_width = FALSE)
+
+ggplot(sens_years, aes(n_years, median)) +
+  geom_ribbon(aes(ymin = p5, ymax = p95), alpha = .15, fill = "forestgreen") +
+  geom_line(colour = "forestgreen", linewidth = 1) + geom_point(size = 2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_y_continuous(labels = lab_m) +
+  labs(x = "Project horizon (years)", y = "Net benefit, NPV (million KES per hectare)",
+       title = "") + #Decision vs horizon (band = 5th-95th percentile)
+  theme_minimal()
+```
+
+# Sensitivity C — discount rate
+
+```{r sens-discount}
+sens_disc <- do.call(rbind, lapply(discount_grid, function(dr)
+  summ(simulate_nb(discount_val = dr), discount_rate = dr)))
+
+sens_disc %>%
+  transmute(`Discount rate (%)` = discount_rate, Mean = fmt_m(mean), Median = fmt_m(median),
+            `5th pct` = fmt_m(p5), `95th pct` = fmt_m(p95),
+            `P(net benefit > 0)` = fmt_pct(P_positive)) %>%
+  kbl(caption = "Net benefit (million KES per hectare) vs discount rate.", booktabs = TRUE, 
+      align = "rrrrrr") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                latex_options = c("striped", "hold_position"), full_width = FALSE)
+
+ggplot(sens_disc, aes(discount_rate, median)) +
+  geom_ribbon(aes(ymin = p5, ymax = p95), alpha = .15, fill = "steelblue") +
+  geom_line(colour = "steelblue", linewidth = 1) + geom_point(size = 2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_y_continuous(labels = lab_m) +
+  labs(x = "Discount rate (%)", y = "Net benefit, NPV (million KES per hectare)",
+       title = "") + #Decision vs discount rate (band = 5th-95th percentile)
+  theme_minimal()
+```
+
+# Combined grid — horizon × discount rate
+
+<!--- Fill = median net benefit; label = P(net benefit > 0).---->
+
+```{r grid, fig.width=9, fig.height=6}
+grid <- expand.grid(n_years = nyear_grid, discount_rate = discount_grid)
+grid_res <- do.call(rbind, Map(function(ny, dr)
+  summ(simulate_nb(ny, dr), n_years = ny, discount_rate = dr),
+  grid$n_years, grid$discount_rate))
+
+ggplot(grid_res, aes(factor(n_years), factor(discount_rate))) +
+  geom_tile(aes(fill = median), colour = "white") +
+  geom_text(aes(label = percent(P_positive, accuracy = 1)), size = 3.5) +
+  scale_fill_gradient2(low = "firebrick", mid = "white", high = "forestgreen",
+                       midpoint = 0, labels = lab_m,
+                       name = "Median net\nbenefit\n(million KES per hectare)") +
+  labs(x = "Project horizon (years)", y = "Discount rate (%)",
+       title = "When is land consolidation worthwhile?",
+       subtitle = "Cell colour = median net benefit (million KES per hectare); 
+       label = probability the net benefit is positive") +
+  theme_minimal()
+
+grid_res %>%
+  transmute(`Horizon (years)` = n_years, `Discount rate (%)` = discount_rate,
+            `Median net benefit (million KES per hectare)` = fmt_m(median),
+            `P(net benefit > 0)` = fmt_pct(P_positive)) %>%
+  kbl(caption = "Full horizon x discount-rate grid (net benefit in million KES per hectare).",
+      booktabs = TRUE, align = "rrrr") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"),
+                latex_options = c("striped", "hold_position"), full_width = FALSE)
+```
